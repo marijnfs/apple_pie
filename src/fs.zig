@@ -46,19 +46,30 @@ pub const ServeError = error{
 } || Response.Error || std.os.SendFileError || std.fs.File.OpenError;
 
 /// Serves a file based on the path of the request
+pub fn serve_path(self: *FileServer, response: *Response, path: []const u8) ServeError!void {
+    const file = self.dir.openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return response.notFound(),
+        else => |e| return e,
+    };
+    defer file.close();
+
+    serveFile(response, path, file) catch |err| switch (err) {
+        error.NotAFile => return response.notFound(),
+        else => return err,
+    };
+}
+
+/// Serves a file based on the path of the request
 pub fn serve(self: *FileServer, response: *Response, request: Request) ServeError!void {
     std.debug.assert(self.initialized);
-    const index = "index.html";
     var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     var path = Uri.resolvePath(request.path(), &buffer);
 
-    if (std.mem.endsWith(u8, path, index)) {
-        return localRedirect(response, request, "./", self.alloc);
-    }
+    std.debug.assert(path.len > 0);
 
-    if (self.base_path) |b_path| {
-        if (std.mem.startsWith(u8, path[1..], b_path)) {
-            path = path[b_path.len + 1 ..];
+    if (self.base_path) |base_path| {
+        if (std.mem.startsWith(u8, path[1..], base_path)) {
+            path = path[base_path.len + 1 ..];
             if (path.len > 0 and path[0] == '/') path = path[1..];
         }
     } else if (path[0] == '/') path = path[1..];
@@ -69,28 +80,20 @@ pub fn serve(self: *FileServer, response: *Response, request: Request) ServeErro
 
     // if the path is '', we should serve the index at root
     var buf_new_path: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    const new_path = if (path.len == 0) index else blk: {
+    const new_path = blk: {
         // if the path is a directory, we should serve the index inside
         const stat = self.dir.statFile(path) catch |err| switch (err) {
             error.FileNotFound => return response.notFound(),
             else => |e| return e,
         };
         if (stat.kind == .Directory)
-            break :blk try std.fmt.bufPrint(&buf_new_path, "{s}/{s}", .{ path, index });
+            break :blk try std.fmt.bufPrint(&buf_new_path, "{s}", .{path});
         // otherwise, we should serve the file at path
         break :blk path;
     };
 
-    const file = self.dir.openFile(new_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return response.notFound(),
-        else => |e| return e,
-    };
-    defer file.close();
-
-    serveFile(response, new_path, file) catch |err| switch (err) {
-        error.NotAFile => return response.notFound(),
-        else => return err,
-    };
+    std.log.info("newpath: {s}", .{new_path});
+    try self.serve_path(response, new_path);
 }
 
 /// Notifies the client with a Moved Permanently header
